@@ -1,7 +1,7 @@
 '''
 UPDATE ON 2023/03/16
 
-1. aims to provide libraries for training model
+1. aims at providing libraries for training model
 
 '''
 
@@ -72,14 +72,17 @@ def get_imgs(img_list, new_img_h = None, new_img_w = None):
         imgs = imgs.map(lambda x: tf.image.resize(x, (new_img_h, new_img_w)))
     imgs = imgs.map(lambda x: (x - 127.5)*0.0078125)
 
-    if IS_DEBUG:
-        img_iter = imgs.as_numpy_iterator()
-        plt.imshow(img_iter.next())
-        plt.show()
-        
     return imgs
 
 def get_label_list(img_list):
+    '''
+        args:
+            img_list: list of image path
+            
+        returns:
+            lab_list: list of label path
+    '''
+    
     lab_list = [None]*len(img_list)
     for i in range(len(lab_list)):
         uid  = (img_list[i].split('.')[0]).split('/')[-1]
@@ -87,36 +90,20 @@ def get_label_list(img_list):
         root = '/'.join(root[0:len(root) - 1])
         lab_list[i] = os.path.join(root, uid + '.json')
 
-    if IS_DEBUG:
-        is_OK = True
-        for i in range(len(lab_list)):
-            uid1 = (img_list[i].split('.')[0]).split('/')[-1]
-            uid2 = (lab_list[i].split('.')[0]).split('/')[-1]
-            if uid1 != uid2:
-                print("[BUG] uid1 != uid2")
-                print(uid1, uid2)
-                is_OK = False
-                break
-        if is_OK:
-            print("label uid = img uid")
-        
-        is_OK = True
-        for i in range(len(lab_list)):
-            try:
-                f = open(lab_list[i])
-                lab = json.load(f)
-                bbox = lab['bbox']
-                is_f = lab['class']
-            except:
-                print("[BUG] no this json file: ", lab_list[i], i)
-                is_OK = False
-                break
-        if is_OK:
-            print("all json exists in the targeted path and all img correspond to one json file!")
-
     return lab_list
 
 def load_labels(label_path):
+    '''
+        args:
+            label_path: data path of label
+        
+        return:
+            [label['class']]: face (1) or non_face (0)
+            label['box']: coordindates of bounding box
+            [label['is_have']]: contain face landmarks (1)  or no face landmarks(0)
+            landmarks: coordinates of face landmarks
+    '''
+    
     with open(label_path.numpy(), 'r', encoding = "utf-8") as f:
         label = json.load(f)
         
@@ -129,6 +116,13 @@ def load_labels(label_path):
     return [label['class']], label['box'], [label['is_have']], landmarks
 
 def get_labels(lab_list):
+    '''
+        args:
+            lab_list: list of label path
+        returns:
+            labs: labels
+    '''
+    
     labs = tf.data.Dataset.list_files(lab_list, shuffle=False)
     labs = labs.map(lambda x: tf.py_function(load_labels, 
                                              [x], 
@@ -136,21 +130,45 @@ def get_labels(lab_list):
                                             )
                    )
 
-    if IS_DEBUG:
-        lab_iter = labs.as_numpy_iterator()
-        print(lab_iter.next())
-        
     return labs
 
 def combine_imgs_and_labels(imgs, labels, batch, pre_fetch):
-    tmp = tf.data.Dataset.zip((imgs, labels))
-    tmp = tmp.shuffle(5000)
-    tmp = tmp.batch(batch)
-    tmp = tmp.prefetch(pre_fetch)
+    '''
+        args:
+            imgs: images
+            labels: labels
+            batch: number of data in one batch 
+            per_fetch: number of data to feteh before processing
+        
+        returns:
+            data: return one batch of images and cooresponding labels
+    '''
     
-    return tmp
+    data = tf.data.Dataset.zip((imgs, labels))
+    data = data.shuffle(5000)
+    data = data.batch(batch)
+    data = data.prefetch(pre_fetch)
+    
+    return data
     
 def custom_loss(class_hat, class_true, bbox_hat, bbox_true, mrks_hat, mrks_true, have_mrks, stage):
+    
+    '''
+        args:
+            class_hat: class prediction (face or non_face)
+            class_true: class ground truth (face or non_face)
+            bbox_hat: bounding box coordindate prediction
+            bbox_true: bounding box coordindate ground truth
+            mrks_hat: face landmarks prediction
+            mrks_true: face landmarks ground truth
+            have_mrks: indicate if this label contain face landmarks
+            stage: 'p' or 'r' or 'o'
+        
+        returns:
+            class_loss: loss of classification
+            regre_loss: loss of bounding box regression
+            marks_loss: loss of landmarks regression
+    '''
     
     if stage == 'p':
         class_loss =  (     class_true[:,0] *tf.math.log(class_hat[:,0,0,0] + 1e-10) + \
@@ -195,6 +213,13 @@ def custom_loss(class_hat, class_true, bbox_hat, bbox_true, mrks_hat, mrks_true,
     return class_loss, regre_loss, marks_loss
 
 def compute_IOU(reg_p, reg_t):
+    
+    '''
+        args:
+            reg_p, reg_t: coordinates of bounding box 1 and 2
+        returns:
+            overlap: overlap percentage of two bounding box
+    '''
     
     area_p = (reg_p[2] - reg_p[0])*(reg_p[3] - reg_p[1])
     area_t = (reg_t[2] - reg_t[0])*(reg_t[3] - reg_t[1])
@@ -384,7 +409,23 @@ class TrainModel(Model):
         return self.model(X, **kwargs)
     
 def train_and_test_stage(data_folders, flag):
-    
+    '''
+        args:
+            data_folders: it is designed to provide multiple sources for training, validation and testing. But, the sub-folders
+            of data_folders need to be the same. For example, data_folders = ['a', 'b']. Then, subfolders of folder 'a' and 'b'
+            need to have 'train' and 'valid' and optional 'test'
+            flag: 
+            1. Training needs training and validation data. Testing data is not necessary. 
+            2. If you want to train the model, "IS_TRAIN" = True
+            3. If you have pre-trained model parameters, "IS_LOAD_WEIGHTS" = True
+            4. If you have saved previous training history, "IS_LOAD_HIST" = True
+            5. If you want to save the current and best model parameters, "IS_SAVE" = True
+            6. If you want to plot training and validation loss, "IS_PLOT" = True
+            7. If you have testing data, choose flag['IS_TEST'] = True
+            8. flag['STAGE'] could be ['p', 'r', 'o']
+        returns:
+            None
+    '''
     if flag['STAGE'] == 'p':
         img_h = P_IMG_H
         img_w = P_IMG_W
